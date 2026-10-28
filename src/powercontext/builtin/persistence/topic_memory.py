@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, tuple_, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -50,6 +50,7 @@ from powercontext.builtin.artifacts.topic_memory import (
 from powercontext.builtin.artifacts.topic_memory.fusion import _fuse_topic_memory_rankings
 from powercontext.builtin.persistence.artifacts import ArtifactRepository
 from powercontext.builtin.persistence.errors import InvalidRepositoryArgumentError
+from powercontext.builtin.persistence.source_lifecycle import unavailable_topics
 from powercontext.builtin.persistence.supervision import database_utc_now
 from powercontext.builtin.persistence.tables import (
     ARTIFACT_HEADS_TABLE,
@@ -350,6 +351,7 @@ class TopicMemoryRepository:
         if not 1 <= limit <= 100:
             raise InvalidRepositoryArgumentError("limit", "must be between 1 and 100")
         await self._check_retrieval_shape(connection)
+        excluded = await unavailable_topics(connection, scope_id)
         statement = (
             select(
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.artifact_id,
@@ -379,6 +381,9 @@ class TopicMemoryRepository:
             .where(
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.family == TopicMemory.family,
+                tuple_(
+                    TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.artifact_id, TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.revision
+                ).not_in(excluded),
             )
         )
         if tag_filter is not None:
@@ -477,16 +482,28 @@ class TopicMemoryRepository:
         query_terms = tuple(sorted(set(analyzed.split())))
         if not analyzed and used_mode == "fts":
             return TopicMemorySearchResult(mode=used_mode, hits=())
+        excluded = set(await unavailable_topics(connection, scope_id))
         request = TopicMemorySearchRequest(
             query=query,
             analyzed_query=" ".join(query_terms),
-            candidate_limit=min(MAX_TOPIC_MEMORY_CHANNEL_CANDIDATES, max(limit * 4, 32)),
+            candidate_limit=min(MAX_TOPIC_MEMORY_CHANNEL_CANDIDATES, max(limit * 4, 32) + len(excluded)),
             mode=used_mode,
             query_vector=query_vector,
             embedding_profile=embedding_profile,
             admission=admission,
         )
         channels = await self.index.search(connection, scope_id, request)
+        if excluded:
+            channels = channels.model_copy(
+                update={
+                    name: tuple(
+                        hit
+                        for hit in getattr(channels, name)
+                        if (hit.artifact_ref.artifact_id, hit.artifact_ref.revision) not in excluded
+                    )
+                    for name in ("topic_fts", "topic_vector", "detail_fts", "detail_vector")
+                }
+            )
         await self._check_retrieval_shape(connection)
         outcome = _fuse_topic_memory_rankings(query, channels, limit, mode=used_mode, admission=admission)
         return TopicMemorySearchResult(

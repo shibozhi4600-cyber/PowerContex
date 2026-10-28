@@ -106,6 +106,7 @@ class PreparedContextBuild:
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple[PreparedContextFragment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,16 @@ class MemoryEntryAddress:
     memory: ArtifactAddress
     entry_id: str
     entry_version_id: str
+
+
+@dataclass(frozen=True)
+class PreparedContextFragment:
+    """One literal half-open character range in an exact scoped Memory version."""
+
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
 
 
 PreparedContextOrigin = MemoryCitation | ArtifactRef | MemoryEntryAddress | ArtifactAddress
@@ -235,6 +246,11 @@ class PreparedContextBuilder:
         if sum(len(candidates.hits) for candidates in experience_candidates) > self.experience_candidate_limit:
             raise PreparedContextInvariantError("experience-candidate-limit")
 
+        if request.evidence_selection:
+            from powercontext.builtin.runtime.evidence_selection import select_memory_evidence
+
+            return select_memory_evidence(request, memory_candidates, current_scope_id=current_scope_id)
+
         content, origins, omissions = self._select_entries(
             request=request,
             current_scope_id=current_scope_id,
@@ -276,6 +292,23 @@ class PreparedContextBuilder:
         the same inputs as :meth:`build_scopes_result` are guaranteed to yield the same
         counters because both go through :meth:`_select_entries`.
         """
+
+        if request.evidence_selection:
+            build = self.build_scopes_result(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+                topic_memory_hits=topic_memory_hits,
+                experience_candidates=experience_candidates,
+                profile_candidates=profile_candidates,
+            )
+            return RecallBudgetView(
+                max_bytes=request.max_bytes,
+                delivered_items=len(build.origins),
+                truncated_items=build.omissions.truncated_items,
+                dropped_items=build.omissions.dropped_items,
+                unused_bytes=max(0, request.max_bytes - build.context.content_bytes),
+            )
 
         content, origins, omissions = self._select_entries(
             request=request,
@@ -475,7 +508,7 @@ class PreparedContextBuilder:
                 entry_version_id=hit.entry_version_id,
             )
             origin: PreparedContextOrigin = citation
-            rendered_citation = citation.model_dump(mode="json")
+            rendered_citation: dict[str, object] = citation.model_dump(mode="json")
             if scope_id is not None:
                 memory = ArtifactAddress(scope_id=scope_id, artifact=hit.memory_ref)
                 origin = MemoryEntryAddress(
@@ -520,7 +553,7 @@ class PreparedContextBuilder:
             if hit.snippet is not None:
                 content["snippet"] = hit.snippet
             origin: PreparedContextOrigin = hit.artifact_ref
-            citation = {"artifact_ref": hit.artifact_ref.model_dump(mode="json")}
+            citation: dict[str, object] = {"artifact_ref": hit.artifact_ref.model_dump(mode="json")}
             body = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
             if scope_id is not None:
                 origin = ArtifactAddress(scope_id=scope_id, artifact=hit.artifact_ref)
