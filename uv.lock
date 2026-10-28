@@ -2727,6 +2727,9 @@ code = [
     { name = "tree-sitter-python" },
     { name = "tree-sitter-typescript" },
 ]
+pdf = [
+    { name = "pypdf" },
+]
 seekdb = [
     { name = "aiosqlite" },
     { name = "apscheduler" },
@@ -2775,7 +2778,7 @@ dev = [
     { name = "langchain" },
     { name = "langchain-core" },
     { name = "langgraph" },
-    { name = "powercontext", extra = ["cli", "code", "server"] },
+    { name = "powercontext", extra = ["cli", "code", "pdf", "server"] },
     { name = "powercontext-langchain" },
     { name = "powercontext-langgraph" },
     { name = "prek" },
@@ -2849,6 +2852,7 @@ requires-dist = [
     { name = "pyobvector", marker = "extra == 'builtin'", specifier = ">=0.2.28,<0.3" },
     { name = "pyobvector", marker = "extra == 'seekdb'", specifier = ">=0.2.28,<0.3" },
     { name = "pyobvector", marker = "extra == 'server'", specifier = ">=0.2.28,<0.3" },
+    { name = "pypdf", marker = "extra == 'pdf'", specifier = "==6.19.0" },
     { name = "pyyaml", marker = "extra == 'builtin'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'cli'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'client'", specifier = ">=6,<7" },
@@ -2871,7 +2875,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12,<5" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.34,<1" },
 ]
-provides-extras = ["builtin", "cli", "client", "code", "seekdb", "server", "tracing-otlp"]
+provides-extras = ["builtin", "cli", "client", "code", "pdf", "seekdb", "server", "tracing-otlp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2880,7 +2884,7 @@ dev = [
     { name = "langchain-core", specifier = ">=1,<2" },
     { name = "langgraph", specifier = ">=1.2,<2" },
     { name = "powercontext", extras = ["cli", "server"] },
-    { name = "powercontext", extras = ["code"] },
+    { name = "powercontext", extras = ["code", "pdf"] },
     { name = "powercontext-langchain", editable = "integrations/langchain" },
     { name = "powercontext-langgraph", editable = "integrations/langgraph" },
     { name = "prek", specifier = ">=0.2.0" },
@@ -3371,6 +3375,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e5/e7/397eaeab4d52126675a30bcbfe1b74b6f3d3512a9e714966a93f08f3da2e/pyobvector-0.2.28.tar.gz", hash = "sha256:d394d66f4a7dc97c221b7584e52b329e3fe61ed96b6f248d7360e3e5a53581ce", size = 81686, upload-time = "2026-06-05T06:42:41.593Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/a6/8acb9821c78bafc3ff9db5bbea05a8b67ff871b7590b7d25cc91c34fc2f0/pyobvector-0.2.28-py3-none-any.whl", hash = "sha256:36708fc0020307890b9001035904ff14719b81e20e58f2a97f7f3739dad53c72", size = 66637, upload-time = "2026-06-05T06:42:38.5Z" },
+]
+
+[[package]]
+name = "pypdf"
+version = "6.19.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/ac/63d71aaedb59acbcdef491e6ca6469165e3771c9c74358204818fd9bc5a6/pypdf-6.19.0.tar.gz", hash = "sha256:bbc43aca292369ccc6cbc8a921991ecf2538a3587ab5a116eff06c321d647155", size = 7033266, upload-time = "2026-09-16T09:32:05.946Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/2c/c43c03eaf630435f023f1dc61ec4a4a78951ad5530a62c71cc89bde307b7/pypdf-6.19.0-py3-none-any.whl", hash = "sha256:7e5d6e730e7dae87d560a2cee218b852f6498c8be61966f3cd02ead971e48d14", size = 395480, upload-time = "2026-09-16T09:32:04.087Z" },
 ]
 
 [[package]]

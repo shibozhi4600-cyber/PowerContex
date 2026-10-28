@@ -44,6 +44,16 @@ jobs:
       - name: Verify frozen baseline ancestry
         run: make -C competition check-baseline
 
+      - name: Check changed Python interfaces and regressions
+        run: |
+          mapfile -t files < <(git diff --name-only dab240063bfcfa7917898dc44da4baadb3747bd0 HEAD -- '*.py')
+          uv tool run --from ruff==0.15.7 ruff check --no-fix "${files[@]}"
+          uv tool run --from ruff==0.15.7 ruff format --check "${files[@]}"
+          uv tool run --from ty==0.0.56 ty check --python competition/.venv "${files[@]}"
+
+      - name: Verify real tagged hybrid indexes before the long trigger suite
+        run: competition/.venv/bin/python -m pytest -q -c competition/pytest.ini tests/builtin/persistence/test_native_hybrid_tags.py
+
       - name: Run all unchanged public acceptance tests in isolated processes
         run: make -C competition test
 
@@ -52,12 +62,9 @@ jobs:
           # This test-only server logging import is outside the contest runtime.
           # Keep the official environment and requirements untouched.
           uv pip install --target .artifacts/regression-tools --no-deps platformdirs==4.10.0
-          mapfile -t tests < <(git diff --name-only dab240063bfcfa7917898dc44da4baadb3747bd0 HEAD -- 'tests/*.py' 'tests/**/*.py')
+          tests=()
+          while IFS= read -r path; do
+            # The native test runs above in its own embedded-database process.
+            if [[ "$path" != tests/builtin/persistence/test_native_hybrid_tags.py ]]; then tests+=("$path"); fi
+          done < <(git diff --name-only dab240063bfcfa7917898dc44da4baadb3747bd0 HEAD -- 'tests/*.py' 'tests/**/*.py')
           PYTHONPATH="$GITHUB_WORKSPACE/.artifacts/regression-tools:$PYTHONPATH" competition/.venv/bin/python -m pytest -q -c competition/pytest.ini "${tests[@]}" tests/test_sources.py tests/builtin/persistence/test_sources.py tests/builtin/runtime/test_processing_source_registry.py tests/builtin/persistence/test_topic_memory.py tests/builtin/runtime/test_topic_memory_application.py
-
-      - name: Check changed Python interfaces and regressions
-        run: |
-          mapfile -t files < <(git diff --name-only dab240063bfcfa7917898dc44da4baadb3747bd0 HEAD -- '*.py')
-          uv tool run --from ruff==0.15.7 ruff check --no-fix "${files[@]}"
-          uv tool run --from ruff==0.15.7 ruff format --check "${files[@]}"
-          uv tool run --from ty==0.0.56 ty check --python competition/.venv "${files[@]}"

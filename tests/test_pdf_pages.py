@@ -192,6 +192,70 @@ class _UnusedMemory:
         pytest.fail("invalid arguments must fail before Memory listing")
 
 
+async def test_document_identity_preserves_short_names_without_selecting_year_or_file_noise() -> None:
+    registry = SourceDefinitionRegistry((PDF_PAGE_SOURCE_DEFINITION,))
+    target = "Net cash provided by operating activities was 100 million in 2024."
+    pages = [(f"{company}_2024_10K", 1, target) for company in ("GE", "3M", "ORION")]
+    pages.extend((
+        ("ACME_2024_10K", 1, "Operating cash flows from operating activities were 900 million in 2024."),
+        (
+            "ACME_2024_10K",
+            2,
+            "Consolidated statements of cash flows. Operating cash flows and operating activities for 2024.",
+        ),
+        ("THE_2024_ANNUAL_REPORT.PDF", 1, "Other cash flow information for 2024."),
+        ("IN_2024_ANNUAL_REPORT.PDF", 1, "Other operating activity information for 2024."),
+        ("WE_2024_ANNUAL_REPORT.PDF", 1, "Other cash flow information for 2024."),
+    ))
+    async with open_builtin_runtime(
+        BuiltinConfig(database=SQLiteConfig()), candidate_pipeline=_PagePipeline()
+    ) as runtime:
+        assert runtime.scopes is not None
+        scope = await runtime.scopes.create(
+            ScopeDraft(title="Identity labels", summary="Synthetic report pages", idempotency_key="identity-labels")
+        )
+        await runtime.ingestion.register(manifest_for_definition(PDF_PAGE_SOURCE_DEFINITION))
+        for document_id, page_number, text in pages:
+            source = await registry.resolve(
+                PDFPageInput(
+                    document_id=document_id,
+                    document_sha256=hashlib.sha256(document_id.encode()).hexdigest(),
+                    page_number=page_number,
+                    text=text,
+                )
+            )
+            await runtime.ingestion.submit(
+                SubmitSourceObservation(
+                    scope_id=scope.scope_id, observation=project_source_for_transport(registry, source)
+                )
+            )
+        memory = runtime.memory.for_scope(scope.scope_id)
+        while (await memory.flush()).processed:
+            pass
+
+        async def documents(question: str, limit: int) -> list[str]:
+            citations = await search_pdf_pages(memory, question, limit=limit)
+            return [
+                (await memory.get(GetMemoryEntryRequest(citation=citation))).entry.text.partition("\n")[0]
+                for citation in citations
+            ]
+
+        for company in ("GE", "3M", "ORION"):
+            for apostrophe in ("'", chr(0x2019)):
+                question = f"What are {company}{apostrophe}s operating cash flows in fiscal 2024?"
+                for limit in (1, 20):
+                    assert await documents(question, limit) == [f"{company}_2024_10K"]
+        expected = {document for document, _, _ in pages}
+        for question in (
+            "What are operating cash flows in fiscal 2024?",
+            "What are the operating cash flows in the annual PDF report for fiscal 2024?",
+            "How much operating cash flow did we have in fiscal 2024?",
+            "2024",
+        ):
+            returned = await documents(question, 20)
+            assert len(returned) == len(pages) and set(returned) == expected
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
 async def test_invalid_search_limit_fails_before_any_memory_access(limit) -> None:
     with pytest.raises(ValueError):

@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Complete PDF page captures and offline retrieval of exact Memory citations."""
+"""Complete PDF page captures and offline retrieval of exact Memory citations.
+
+Install ``powercontext[pdf]`` for the pinned parser used by page capture.
+"""
 
 from __future__ import annotations
 
@@ -150,6 +153,53 @@ class _ScopedMemory(Protocol):
 
 
 _WORDS = re.compile(r"[a-z]+|\d+")
+_IDENTITY_WORDS = re.compile(r"[^\W_]+")
+_FILING_MARKERS = re.compile(r"(?<![a-z0-9])(?:10[-_ ]?[kq]|20[-_ ]?f|40[-_ ]?f|[68][-_ ]?k)(?![a-z0-9])")
+_IDENTITY_NOISE = frozenset([
+    "pdf",
+    "txt",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "csv",
+    "json",
+    "html",
+    "htm",
+    "md",
+    "quarterly",
+    "quarter",
+    "reports",
+    "annualreport",
+    "annualreports",
+    "filing",
+    "filings",
+    "financial",
+    "financials",
+    "we",
+    "us",
+    "me",
+    "my",
+    "mine",
+    "ourselves",
+    "he",
+    "him",
+    "his",
+    "she",
+    "her",
+    "hers",
+    "whom",
+    "whose",
+    "any",
+    "all",
+    "some",
+    "every",
+    "much",
+    "many",
+    "such",
+    "whether",
+    "also",
+])
 _STOP_WORDS = frozenset([
     "a",
     "an",
@@ -282,6 +332,21 @@ def _terms(text: str) -> list[str]:
     return [_stem(word) for word in _WORDS.findall(text.lower()) if word not in _STOP_WORDS]
 
 
+def _identity_terms(text: str) -> set[str]:
+    # Identity words keep digits attached to letters and do not undergo stemming.
+    # Filing/date metadata and possessive suffixes are not company identities.
+    normalized = re.sub(r"['’]s(?![a-z0-9])", "", text.casefold())  # noqa: RUF001 - Also handle typographic possessives.
+    words = _IDENTITY_WORDS.findall(_FILING_MARKERS.sub(" ", normalized))
+    return {
+        word
+        for word in words
+        if any(character.isalpha() for character in word)
+        and word not in _STOP_WORDS
+        and word not in _IDENTITY_NOISE
+        and re.fullmatch(r"(?:(?:fy|fiscal)\d{2,4}|q[1-4]|(?:19|20)\d{2}q[1-4])", word) is None
+    }
+
+
 def _query_weights(question: str) -> dict[str, float]:
     words = set(_WORDS.findall(question.lower()))
     weights = dict.fromkeys(_terms(question), 1.0)
@@ -324,10 +389,9 @@ async def search_pdf_pages(memory: _ScopedMemory, question: str, limit: int = 10
     # Restrict only when the question explicitly matches a document label word;
     # a year alone never selects an unrelated company.
     question_terms = set(_terms(question))
-    labels = [set(_terms(record.entry.text.partition("\n")[0])) for record in records]
-    label_matches = [
-        len({term for term in label & question_terms if term.isalpha() and len(term) > 2}) for label in labels
-    ]
+    identity_terms = _identity_terms(question)
+    labels = [_identity_terms(record.entry.text.partition("\n")[0]) for record in records]
+    label_matches = [len(label & identity_terms) for label in labels]
     best_label = max(label_matches)
     if best_label:
         selected = [record for record, count in zip(records, label_matches, strict=True) if count == best_label]
