@@ -23,6 +23,7 @@ import hashlib
 import io
 import math
 import re
+import unicodedata
 from collections import Counter
 from itertools import pairwise
 from typing import Literal, Protocol
@@ -77,6 +78,11 @@ class PDFPageInput(BaseModel):
         if re.fullmatch("[0-9a-f]{64}", value) is None:
             raise ValueError("PDF document_sha256 must be lowercase SHA-256 hexadecimal")  # noqa: TRY003
         return value
+
+    @field_validator("text")
+    @classmethod
+    def normalize_page_text(cls, value: str) -> str:
+        return unicodedata.normalize("NFC", value)
 
 
 class PDFPageSource(Source, PDFPageInput):
@@ -381,6 +387,30 @@ def _label_identity(text: str) -> tuple[set[str], str]:
     return terms, compact
 
 
+def _filter_document_years(records: list[MemoryEntryRecord], question: str) -> list[MemoryEntryRecord]:
+    """Use only unambiguous filing-year hints that cover every requested year."""
+    label_years = [
+        {word for word in _terms(record.entry.text.partition("\n")[0]) if re.fullmatch(r"(?:19|20)\d{2}", word)}
+        for record in records
+    ]
+    available = {year for years in label_years for year in years}
+    requested = {word for word in _terms(question) if re.fullmatch(r"(?:19|20)\d{2}", word)}
+    fiscal_years = re.findall(r"(?<!\w)fy\s*['’]?\s*(\d{2}|\d{4})(?!\w)", question.casefold())  # noqa: RUF001
+    for year in fiscal_years:
+        if len(year) == 4:
+            requested.add(year)
+            continue
+        matches = {value for value in available if value.endswith(year)}
+        if len(matches) != 1:
+            return records
+        requested.update(matches)
+    # A filing year is not necessarily the only fiscal period its tables cover.
+    # Partial coverage must not discard the report containing the missing period.
+    if not requested or not requested <= available:
+        return records
+    return [record for record, years in zip(records, label_years, strict=True) if years & requested]
+
+
 def _query_weights(question: str) -> dict[str, float]:
     words = set(_WORDS.findall(question.lower()))
     weights = dict.fromkeys(_terms(question), 1.0)
@@ -433,7 +463,6 @@ async def search_pdf_pages(memory: _ScopedMemory, question: str, limit: int = 10
     # Document labels are part of the stored projection, not an external corpus.
     # Restrict only when the question explicitly matches a document label word;
     # a year alone never selects an unrelated company.
-    question_terms = set(_terms(question))
     identity_terms = _identity_terms(question) | _identity_phrases(question)
     labels = [_label_identity(record.entry.text.partition("\n")[0]) for record in records]
     label_matches = [len(label & identity_terms) for label, _ in labels]
@@ -441,15 +470,11 @@ async def search_pdf_pages(memory: _ScopedMemory, question: str, limit: int = 10
     require_whole = any(whole_matches)
     # A longer company's partial words must not outrank an explicitly named
     # complete company identity. Keep the previous fallback when none match.
-    label_matches = [
-        score if whole or not require_whole else 0 for score, whole in zip(label_matches, whole_matches, strict=True)
-    ]
+    label_matches = [int(whole) for whole in whole_matches] if require_whole else label_matches
     best_label = max(label_matches)
     if best_label:
         selected = [record for record, count in zip(records, label_matches, strict=True) if count == best_label]
-        years = {word for word in question_terms if re.fullmatch(r"(?:19|20)\d{2}", word)}
-        year_matched = [record for record in selected if years & set(_terms(record.entry.text.partition("\n")[0]))]
-        records = year_matched or selected
+        records = _filter_document_years(selected, question)
 
     frequencies: list[Counter[str]] = []
     lengths: list[int] = []
