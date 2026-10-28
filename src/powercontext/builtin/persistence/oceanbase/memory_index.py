@@ -99,6 +99,40 @@ ORDER BY l2_distance(m.embedding, :query_vector) APPROXIMATE
 LIMIT :candidate_limit
 """
 
+_OCEANBASE_TAGGED_VECTOR_SEARCH_SQL = """
+SELECT /*+ LEADING(eligible m v) USE_NL(m) */
+    m.memory_artifact_id,
+    m.head_revision,
+    m.entry_id,
+    m.entry_version_id,
+    v.text,
+    l2_distance(m.embedding, :query_vector) AS distance
+FROM (
+    SELECT /*+ NO_MERGE */ tags.artifact_id, tags.target_id
+    FROM pc_artifact_tags AS tags
+    WHERE tags.scope_id = :scope_id
+      AND tags.family = 'memory'
+      AND tags.artifact_id IN :memory_artifact_ids
+      AND tags.target_type = 'memory_entry'
+      AND tags.tag_key_hash IN :tag_hashes
+      AND tags.tag_key IN :tag_keys
+    GROUP BY tags.artifact_id, tags.target_id
+    HAVING COUNT(*) >= :tag_minimum
+) AS eligible
+JOIN pc_memory_vector_entries AS m
+  ON m.scope_id = :scope_id
+ AND m.memory_artifact_id = eligible.artifact_id
+ AND m.entry_id = eligible.target_id
+JOIN pc_memory_entry_versions AS v
+  ON v.scope_id = m.scope_id
+ AND v.memory_artifact_id = m.memory_artifact_id
+ AND v.entry_version_id = m.entry_version_id
+WHERE m.scope_id = :scope_id
+  AND m.memory_artifact_id IN :memory_artifact_ids
+ORDER BY l2_distance(m.embedding, :query_vector) APPROXIMATE
+LIMIT :candidate_limit
+"""
+
 _OCEANBASE_LEXICAL_SEARCH_SQL = """
 SELECT
     f.memory_artifact_id, f.head_revision, f.entry_id, f.entry_version_id, v.text,
@@ -139,9 +173,10 @@ class OceanBaseMemoryHybridIndex(CompositeMemoryIndex):
         lexical = _OCEANBASE_LEXICAL_SEARCH_SQL.format(
             tag_predicate="" if request.tag_filter is None else memory_tag_sql("f")
         )
-        vector = _OCEANBASE_VECTOR_SEARCH_SQL
-        if request.tag_filter is not None:
-            vector = vector.replace("ORDER BY", memory_tag_sql("m") + "ORDER BY")
+        # A correlated scalar COUNT can be evaluated above the ANN top-k and
+        # lose eligible distant entries. Drive the tagged branch from the
+        # distinct eligible identities instead, before its distance limit.
+        vector = _OCEANBASE_VECTOR_SEARCH_SQL if request.tag_filter is None else _OCEANBASE_TAGGED_VECTOR_SEARCH_SQL
         # Each derived branch applies its own limit, then the outer ordering
         # retains the channel rank used by the existing fusion policy.
         statement = text(

@@ -1662,6 +1662,7 @@ requires-dist = [
     { name = "pyobvector", marker = "extra == 'builtin'", specifier = ">=0.2.28,<0.3" },
     { name = "pyobvector", marker = "extra == 'seekdb'", specifier = ">=0.2.28,<0.3" },
     { name = "pyobvector", marker = "extra == 'server'", specifier = ">=0.2.28,<0.3" },
+    { name = "pypdf", extras = ["crypto"], marker = "extra == 'pdf'", specifier = "==6.19.0" },
     { name = "pyyaml", marker = "extra == 'builtin'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'cli'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'client'", specifier = ">=6,<7" },
@@ -1684,7 +1685,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12,<5" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.34,<1" },
 ]
-provides-extras = ["builtin", "cli", "client", "code", "seekdb", "server", "tracing-otlp"]
+provides-extras = ["builtin", "cli", "client", "code", "pdf", "seekdb", "server", "tracing-otlp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1693,7 +1694,7 @@ dev = [
     { name = "langchain-core", specifier = ">=1,<2" },
     { name = "langgraph", specifier = ">=1.2,<2" },
     { name = "powercontext", extras = ["cli", "server"] },
-    { name = "powercontext", extras = ["code"] },
+    { name = "powercontext", extras = ["code", "pdf"] },
     { name = "powercontext-langchain", editable = "../../integrations/langchain" },
     { name = "powercontext-langgraph", editable = "../../integrations/langgraph" },
     { name = "prek", specifier = ">=0.2.0" },

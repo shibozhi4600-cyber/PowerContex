@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -41,48 +42,51 @@ def _message(event_id: str, parent: str | None, body: str) -> dict[str, JsonValu
     return {"type": "message", "id": event_id, "parentId": parent, "message": {"role": "user", "content": body}}
 
 
-async def test_full_tools_and_control_ancestors_survive_transport_without_truncation() -> None:
-    output = "完整工具结果\n" * 10_000
-    records: list[dict[str, JsonValue]] = [
-        _message("root", None, "  original request  "),
-        {"type": "thinking_level_change", "id": "control", "parentId": "root"},
-        {
-            "type": "message",
-            "id": "call",
-            "parentId": "control",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "not visible"},
-                    {"type": "toolCall", "name": "read", "id": "invoke", "arguments": {"z": 1, "a": "中文"}},
-                ],
+def test_full_tools_and_control_ancestors_survive_transport_without_truncation() -> None:
+    async def scenario() -> None:
+        output = "完整工具结果\n" * 10_000
+        records: list[dict[str, JsonValue]] = [
+            _message("root", None, "  original request  "),
+            {"type": "thinking_level_change", "id": "control", "parentId": "root"},
+            {
+                "type": "message",
+                "id": "call",
+                "parentId": "control",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "not visible"},
+                        {"type": "toolCall", "name": "read", "id": "invoke", "arguments": {"z": 1, "a": "中文"}},
+                    ],
+                },
             },
-        },
-        {
-            "type": "message",
-            "id": "result",
-            "parentId": "call",
-            "message": {"role": "toolResult", "toolName": "read", "toolCallId": "invoke", "content": output},
-            "extra_metadata": {"retain": True},
-        },
-        {"type": "compaction", "id": "summary", "parentId": "result", "summary": "compressed view"},
-    ]
-    events = parse_pi_session(PiSessionInput(content=b"\xef\xbb\xbf" + _archive(records)))
-    assert [event.event_id for event in events] == ["root", "call", "result", "summary"]
-    assert events[0].content == "user:   original request  "
-    assert events[1].content == 'assistant: [tool_call read invoke] {"a":"中文","z":1}'
-    assert events[2].content == f"toolResult: [tool_result read invoke] {output}"
-    registry = SourceDefinitionRegistry((PI_EVENT_SOURCE_DEFINITION,))
-    for event in events:
-        source = await registry.resolve(event)
-        assert len(source.name) <= 256
-        assert await registry.read(source) == event
-        observed = project_source_for_transport(registry, source)
-        reloaded = type(observed).model_validate_json(observed.model_dump_json())
-        evidence = TextEvidence.model_validate(reloaded.projection(TEXT_EVIDENCE_PROJECTION_KEY))
-        assert evidence.content == event.content
-        assert evidence.metadata["parent_id"] == event.parent_id
-    assert events[2].record == records[3]
+            {
+                "type": "message",
+                "id": "result",
+                "parentId": "call",
+                "message": {"role": "toolResult", "toolName": "read", "toolCallId": "invoke", "content": output},
+                "extra_metadata": {"retain": True},
+            },
+            {"type": "compaction", "id": "summary", "parentId": "result", "summary": "compressed view"},
+        ]
+        events = parse_pi_session(PiSessionInput(content=b"\xef\xbb\xbf" + _archive(records)))
+        assert [event.event_id for event in events] == ["root", "call", "result", "summary"]
+        assert events[0].content == "user:   original request  "
+        assert events[1].content == 'assistant: [tool_call read invoke] {"a":"中文","z":1}'
+        assert events[2].content == f"toolResult: [tool_result read invoke] {output}"
+        registry = SourceDefinitionRegistry((PI_EVENT_SOURCE_DEFINITION,))
+        for event in events:
+            source = await registry.resolve(event)
+            assert len(source.name) <= 256
+            assert await registry.read(source) == event
+            observed = project_source_for_transport(registry, source)
+            reloaded = type(observed).model_validate_json(observed.model_dump_json())
+            evidence = TextEvidence.model_validate(reloaded.projection(TEXT_EVIDENCE_PROJECTION_KEY))
+            assert evidence.content == event.content
+            assert evidence.metadata["parent_id"] == event.parent_id
+        assert events[2].record == records[3]
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -147,69 +151,77 @@ class _Sink:
         return SourceRef(source_type=definition, source_id=item_id)
 
 
-async def test_partial_failure_replays_safely_and_off_branch_mutation_cannot_advance_checkpoint(tmp_path: Path) -> None:
-    records = [_message("root", None, "shared"), _message("left", "root", "left"), _message("right", "root", "right")]
-    path = tmp_path / "session.jsonl"
-    path.write_bytes(_archive(records))
-    checkpoints, sink = _Checkpoints(), _Sink()
-    lifecycle = ConnectorLifecycle(sink=sink, checkpoints=checkpoints)
-    binding = ConnectorBinding(
-        scope_id="scope", binding_id="pi", connector_name="pi-session-history", connector_version="1"
-    )
-    sink.fail_once = "left"
-    with pytest.raises(RuntimeError):
+def test_partial_failure_replays_safely_and_off_branch_mutation_cannot_advance_checkpoint(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        records = [
+            _message("root", None, "shared"),
+            _message("left", "root", "left"),
+            _message("right", "root", "right"),
+        ]
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(_archive(records))
+        checkpoints, sink = _Checkpoints(), _Sink()
+        lifecycle = ConnectorLifecycle(sink=sink, checkpoints=checkpoints)
+        binding = ConnectorBinding(
+            scope_id="scope", binding_id="pi", connector_name="pi-session-history", connector_version="1"
+        )
+        sink.fail_once = "left"
+        with pytest.raises(RuntimeError):
+            await lifecycle.run(PiSessionConnector(path, "left"), binding)
+        assert checkpoints.value is None and len(sink.captured) == 1
         await lifecycle.run(PiSessionConnector(path, "left"), binding)
-    assert checkpoints.value is None and len(sink.captured) == 1
-    await lifecycle.run(PiSessionConnector(path, "left"), binding)
-    assert len(sink.captured) == 2 and sink.attempts.count("root") == 2
-    switched = await lifecycle.run(PiSessionConnector(path, "right"), binding)
-    assert len(switched.items) == 1 and len(sink.captured) == 3
-    stable = checkpoints.value
-    attempts = list(sink.attempts)
-    records[1] = _message("left", "root", "rewritten, even though right is selected")
-    path.write_bytes(_archive(records))
-    with pytest.raises(ValueError, match="changed or removed"):
-        await lifecycle.run(PiSessionConnector(path, "right"), binding)
-    assert checkpoints.value == stable and sink.attempts == attempts
+        assert len(sink.captured) == 2 and sink.attempts.count("root") == 2
+        switched = await lifecycle.run(PiSessionConnector(path, "right"), binding)
+        assert len(switched.items) == 1 and len(sink.captured) == 3
+        stable = checkpoints.value
+        attempts = list(sink.attempts)
+        records[1] = _message("left", "root", "rewritten, even though right is selected")
+        path.write_bytes(_archive(records))
+        with pytest.raises(ValueError, match="changed or removed"):
+            await lifecycle.run(PiSessionConnector(path, "right"), binding)
+        assert checkpoints.value == stable and sink.attempts == attempts
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("separator", [chr(0x85), chr(0x2028), chr(0x2029)])
-async def test_unicode_separators_inside_json_strings_survive_incremental_capture(
-    separator: str, tmp_path: Path
-) -> None:
-    root = _message("root", None, f"before{separator}after")
-    result: dict[str, JsonValue] = {
-        "type": "message",
-        "id": "result",
-        "parentId": "root",
-        "message": {
-            "role": "toolResult",
-            "toolName": "read",
-            "toolCallId": "call",
-            "content": [{"type": "text", "text": f"complete{separator}tool output"}],
-        },
-    }
-    # _archive uses ensure_ascii=False: these are literal UTF-8 characters, not
-    # escaped JSON sequences. Only ASCII LF separates the JSONL records.
-    raw = _archive([root, result])
-    assert len([json.loads(line) for line in raw.decode().split("\n")]) == 3
-    events = parse_pi_session(PiSessionInput(content=raw))
-    assert events[0].content == f"user: before{separator}after"
-    assert events[1].content == f"toolResult: [tool_result read call] complete{separator}tool output"
-    assert events[1].record == result
+def test_unicode_separators_inside_json_strings_survive_incremental_capture(separator: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        root = _message("root", None, f"before{separator}after")
+        result: dict[str, JsonValue] = {
+            "type": "message",
+            "id": "result",
+            "parentId": "root",
+            "message": {
+                "role": "toolResult",
+                "toolName": "read",
+                "toolCallId": "call",
+                "content": [{"type": "text", "text": f"complete{separator}tool output"}],
+            },
+        }
+        # _archive uses ensure_ascii=False: these are literal UTF-8 characters, not
+        # escaped JSON sequences. Only ASCII LF separates the JSONL records.
+        raw = _archive([root, result])
+        assert len([json.loads(line) for line in raw.decode().split("\n")]) == 3
+        events = parse_pi_session(PiSessionInput(content=raw))
+        assert events[0].content == f"user: before{separator}after"
+        assert events[1].content == f"toolResult: [tool_result read call] complete{separator}tool output"
+        assert events[1].record == result
 
-    path = tmp_path / "unicode-session.jsonl"
-    checkpoints, sink = _Checkpoints(), _Sink()
-    lifecycle = ConnectorLifecycle(sink=sink, checkpoints=checkpoints)
-    binding = ConnectorBinding(
-        scope_id="unicode", binding_id="pi", connector_name="pi-session-history", connector_version="1"
-    )
-    path.write_bytes(b"\xef\xbb\xbf" + _archive([root]).replace(b"\n", b"\r\n"))
-    first = await lifecycle.run(PiSessionConnector(path), binding)
-    assert len(first.items) == 1
-    path.write_bytes(b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n"))
-    second = await lifecycle.run(PiSessionConnector(path), binding)
-    assert second.previous_checkpoint == first.committed_checkpoint and len(second.items) == 1
-    assert tuple(sink.captured.values()) == events
-    replay = await lifecycle.run(PiSessionConnector(path), binding)
-    assert replay.items == () and replay.committed_checkpoint == second.committed_checkpoint
+        path = tmp_path / "unicode-session.jsonl"
+        checkpoints, sink = _Checkpoints(), _Sink()
+        lifecycle = ConnectorLifecycle(sink=sink, checkpoints=checkpoints)
+        binding = ConnectorBinding(
+            scope_id="unicode", binding_id="pi", connector_name="pi-session-history", connector_version="1"
+        )
+        path.write_bytes(b"\xef\xbb\xbf" + _archive([root]).replace(b"\n", b"\r\n"))
+        first = await lifecycle.run(PiSessionConnector(path), binding)
+        assert len(first.items) == 1
+        path.write_bytes(b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n"))
+        second = await lifecycle.run(PiSessionConnector(path), binding)
+        assert second.previous_checkpoint == first.committed_checkpoint and len(second.items) == 1
+        assert tuple(sink.captured.values()) == events
+        replay = await lifecycle.run(PiSessionConnector(path), binding)
+        assert replay.items == () and replay.committed_checkpoint == second.committed_checkpoint
+
+    asyncio.run(scenario())

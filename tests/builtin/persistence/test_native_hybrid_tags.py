@@ -191,7 +191,7 @@ async def test_tagged_hybrid_filters_current_scope_and_uses_both_native_indexes(
             )
             previous_sparse_tags = await contexts.records.get_tags(sparse_scope, sparse_tag_target)
             await contexts.records.replace_tags(
-                sparse_scope, sparse_tag_target, ("selected",), expected_etag=previous_sparse_tags.etag
+                sparse_scope, sparse_tag_target, ("selected", "reviewed"), expected_etag=previous_sparse_tags.etag
             )
 
             statements.clear()
@@ -247,3 +247,28 @@ async def test_tagged_hybrid_filters_current_scope_and_uses_both_native_indexes(
                 )
                 == sparse_target
             )
+
+            # Aggregating the eligible identities must preserve both matching
+            # modes without duplicating an entry that has two matching tags.
+            for tag_filter, expected_hits in (
+                (TagFilter(tags=("selected", "reviewed"), match="all"), 1),
+                (TagFilter(tags=("selected", "missing"), match="any"), 1),
+                (TagFilter(tags=("selected", "missing"), match="all"), 0),
+            ):
+                filtered = await sparse_memory.search(
+                    _SPARSE_QUERY,
+                    memories=(sparse_head,),
+                    mode="hybrid",
+                    limit=1,
+                    tag_filter=tag_filter,
+                )
+                assert len(filtered.hits) == expected_hits
+                if filtered.hits:
+                    (filtered_hit,) = filtered.hits
+                    assert filtered_hit.memory_ref == sparse_head.as_ref()
+                    assert (filtered_hit.entry_id, filtered_hit.entry_version_id, filtered_hit.text) == (
+                        sparse_target.entry_id,
+                        sparse_target.entry_version_id,
+                        sparse_target.text,
+                    )
+                    assert filtered_hit.matched_by == ("vector",)
