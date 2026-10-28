@@ -1,0 +1,53 @@
+name: Selected PowerContext contest tasks
+
+on:
+  push:
+    branches: [codex/powercontext-csv-rerank]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contest-selected-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  csv-and-http-reranking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      POWERCONTEXT_CANDIDATE: ${{ github.workspace }}
+      POWERCONTEXT_PUBLIC: ${{ github.workspace }}/competition
+      PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/competition
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      PYTHONHASHSEED: "0"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      TZ: UTC
+    steps:
+      - name: Check out complete source history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.12"
+
+      - name: Install official locked Linux Python 3.12 dependencies
+        run: make -C competition install
+
+      - name: Verify frozen baseline ancestry
+        run: make -C competition check-baseline
+
+      - name: Run unchanged public acceptance tests
+        run: make -C competition test-csv test-rerank
+
+      - name: Run additional parser and protocol regressions
+        run: >-
+          competition/.venv/bin/python -m pytest -q -c competition/pytest.ini
+          tests/test_csv_rows.py tests/builtin/artifacts/memory/test_http_reranker.py
