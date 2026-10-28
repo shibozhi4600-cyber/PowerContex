@@ -21,7 +21,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
@@ -132,7 +132,7 @@ def _visible_blocks(value: JsonValue, *, tool_calls: bool = False) -> str:
 
 def _event_body(record: dict[str, JsonValue]) -> tuple[str, str] | None:
     event_type = record.get("type")
-    if event_type in {"compaction", "branch_summary"}:
+    if isinstance(event_type, str) and event_type in {"compaction", "branch_summary"}:
         summary = record.get("summary")
         if not isinstance(summary, str):
             raise ValueError("Pi summary events require string summary")  # noqa: TRY003
@@ -217,7 +217,9 @@ def _parse_archive(value: PiSessionInput) -> _Archive:
     while leaf_id is not None:
         record = records[leaf_id]
         chain.append(record)
-        leaf_id = record["parentId"]
+        # Every record's identity fields were validated above, before walking
+        # any selected branch. JSON's recursive value type cannot retain that.
+        leaf_id = cast(str | None, record["parentId"])
     events: list[PiEventInput] = []
     for record in reversed(chain):
         body = _event_body(record)
@@ -226,9 +228,9 @@ def _parse_archive(value: PiSessionInput) -> _Archive:
             events.append(
                 PiEventInput(
                     session_id=session_id,
-                    event_id=record["id"],
-                    parent_id=record["parentId"],
-                    event_type=record["type"],
+                    event_id=cast(str, record["id"]),
+                    parent_id=cast(str | None, record["parentId"]),
+                    event_type=cast(str, record["type"]),
                     role=role,
                     content=f"{role}: {text}",
                     record=record,
