@@ -141,7 +141,7 @@ class OceanBaseMemoryHybridIndex(CompositeMemoryIndex):
         )
         vector = _OCEANBASE_VECTOR_SEARCH_SQL
         if request.tag_filter is not None:
-            vector = vector.replace("ORDER BY", memory_tag_sql("m") + "ORDER BY").replace(" APPROXIMATE", "")
+            vector = vector.replace("ORDER BY", memory_tag_sql("m") + "ORDER BY")
         # Each derived branch applies its own limit, then the outer ordering
         # retains the channel rank used by the existing fusion policy.
         statement = text(
