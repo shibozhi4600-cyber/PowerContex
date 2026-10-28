@@ -38,7 +38,7 @@ classifiers = [
 
 [project.optional-dependencies]
 pdf = [
-    "pypdf==6.19.0",
+    "pypdf[crypto]==6.19.0",
 ]
 code = [
     "tree-sitter==0.26.0",

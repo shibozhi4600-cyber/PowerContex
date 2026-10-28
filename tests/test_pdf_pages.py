@@ -75,6 +75,16 @@ def _pdf(texts: tuple[str, ...], *, password: str | None = None) -> bytes:
     return result.getvalue()
 
 
+def test_empty_password_aes_permissions_preserve_readable_page_text() -> None:
+    writer = PdfWriter(clone_from=io.BytesIO(_pdf(("AES permission-only report 001",))))
+    writer.encrypt(user_password="", owner_password="owner-only", algorithm="AES-256")  # noqa: S106
+    stream = io.BytesIO()
+    writer.write(stream)
+    (page,) = parse_pdf_document(PDFDocumentInput(document_id="permission-report", content=stream.getvalue()))
+    assert page.page_number == 1
+    assert page.text == "AES permission-only report 001"
+
+
 async def test_every_page_including_last_and_blank_is_captured_with_exact_revision() -> None:
     raw = _pdf(("First page revenue 001", "", "Third page liabilities 900", "", "Last page appendix 123"))
     pages = parse_pdf_document(PDFDocumentInput(document_id="Example / report", content=raw))

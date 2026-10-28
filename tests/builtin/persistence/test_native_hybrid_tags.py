@@ -40,6 +40,9 @@ pytestmark = pytest.mark.skipif(
     reason="Requires optional pylibseekdb on Linux x86_64; the fixed contest environment runs this real index check.",
 )
 
+_SPARSE_QUERY = "sparseprobe"
+_SPARSE_TARGET_TEXT = "Distinctive selected distant vector evidence."
+
 
 class _UnitEmbedding:
     profile = EmbeddingProfile(
@@ -51,7 +54,9 @@ class _UnitEmbedding:
     )
 
     async def embed(self, texts: tuple[str, ...], /) -> EmbeddingResult:
-        return EmbeddingResult(vectors=tuple((1.0, 0.0, 0.0) for _ in texts))
+        return EmbeddingResult(
+            vectors=tuple((0.8, 0.6, 0.0) if text == _SPARSE_TARGET_TEXT else (1.0, 0.0, 0.0) for text in texts)
+        )
 
 
 @pytest.mark.asyncio
@@ -102,9 +107,20 @@ async def test_tagged_hybrid_filters_current_scope_and_uses_both_native_indexes(
             )
 
             statements: list[tuple[str, Any]] = []
+            candidate_limits: list[int] = []
 
             def record(_connection, _cursor, statement, parameters, _context, _executemany) -> None:
                 statements.append((statement, parameters))
+                if (
+                    "pc_memory_entry_heads" in statement
+                    and "pc_memory_vector_entries" in statement
+                    and "AGAINST" in statement.upper()
+                    and "l2_distance" in statement.lower()
+                ):
+                    for bindings in _context.compiled_parameters:
+                        bound_limit = bindings["candidate_limit"]
+                        assert type(bound_limit) is int and bound_limit > 0
+                        candidate_limits.append(bound_limit)
 
             event.listen(Engine, "before_cursor_execute", record)
             try:
@@ -146,3 +162,88 @@ async def test_tagged_hybrid_filters_current_scope_and_uses_both_native_indexes(
             plan = "\n".join(str(row[0]) for row in rows)
             assert "TEXT RETRIEVAL SCAN" in plan, f"Tagged hybrid lost the native FTS index:\n{plan}"
             assert "VECTOR INDEX" in plan, f"Tagged hybrid lost the native vector index:\n{plan}"
+
+            # A sparse tag must be applied before ANN candidate truncation.
+            # Every untagged neighbor is closer to the query than the only
+            # tagged target, whose text cannot be rescued by the FTS channel.
+            # Reuse the same embedded instance: pylibseekdb is process-global.
+            sparse_scope = "sparse-tag-scope"
+            sparse_memory = (await contexts.get(sparse_scope)).artifacts.memory
+            untagged_count = 80
+            sparse_head = await sparse_memory.remember(
+                memory=None,
+                entries=(
+                    *(
+                        MemoryEntryInput(kind="fact", text=f"{_SPARSE_QUERY} untagged near neighbor {index}.")
+                        for index in range(untagged_count)
+                    ),
+                    MemoryEntryInput(kind="fact", text=_SPARSE_TARGET_TEXT),
+                ),
+                mode="append",
+            )
+            assert sparse_head is not None
+            sparse_target = next(
+                entry for entry in await sparse_memory.entries(sparse_head) if entry.text == _SPARSE_TARGET_TEXT
+            )
+            assert _SPARSE_QUERY not in sparse_target.text.casefold()
+            sparse_tag_target = MemoryEntryTagTarget(
+                artifact_id=sparse_head.artifact_id, entry_id=sparse_target.entry_id
+            )
+            previous_sparse_tags = await contexts.records.get_tags(sparse_scope, sparse_tag_target)
+            await contexts.records.replace_tags(
+                sparse_scope, sparse_tag_target, ("selected",), expected_etag=previous_sparse_tags.etag
+            )
+
+            statements.clear()
+            candidate_limits.clear()
+            event.listen(Engine, "before_cursor_execute", record)
+            try:
+                sparse_result = await sparse_memory.search(
+                    _SPARSE_QUERY,
+                    memories=(sparse_head,),
+                    mode="hybrid",
+                    limit=1,
+                    tag_filter=TagFilter(tags=("selected",)),
+                )
+            finally:
+                event.remove(Engine, "before_cursor_execute", record)
+
+            sparse_candidates = [
+                (query, bindings)
+                for query, bindings in statements
+                if "pc_memory_entry_heads" in query
+                and "pc_memory_vector_entries" in query
+                and "AGAINST" in query.upper()
+                and "l2_distance" in query.lower()
+            ]
+            assert len(sparse_candidates) == 1, "sparse tagged hybrid must issue one native candidate statement"
+            assert len(candidate_limits) == 1
+            assert untagged_count > candidate_limits[0], "the sparse fixture must exceed the actual ANN candidate limit"
+            sparse_statement, sparse_parameters = sparse_candidates[0]
+            assert "pc_artifact_tags" in sparse_statement
+            async with contexts.database.transaction() as connection:
+                sparse_rows = (await connection.exec_driver_sql(f"EXPLAIN {sparse_statement}", sparse_parameters)).all()
+            sparse_plan = "\n".join(str(row[0]) for row in sparse_rows)
+            assert "TEXT RETRIEVAL SCAN" in sparse_plan, f"Sparse tagged query lost the FTS index:\n{sparse_plan}"
+            assert "VECTOR INDEX" in sparse_plan, f"Sparse tagged query lost the vector index:\n{sparse_plan}"
+            assert len(sparse_result.hits) == 1, (
+                "tag filtering after unfiltered ANN top-k would lose the distant target"
+            )
+            (sparse_hit,) = sparse_result.hits
+            assert sparse_hit.memory_ref == sparse_head.as_ref()
+            assert (sparse_hit.entry_id, sparse_hit.entry_version_id, sparse_hit.text) == (
+                sparse_target.entry_id,
+                sparse_target.entry_version_id,
+                sparse_target.text,
+            )
+            assert sparse_hit.matched_by == ("vector",), "the tagged target must be recalled without any lexical match"
+            assert (
+                await sparse_memory.validate_citation(
+                    MemoryCitation(
+                        memory_ref=sparse_hit.memory_ref,
+                        entry_id=sparse_hit.entry_id,
+                        entry_version_id=sparse_hit.entry_version_id,
+                    )
+                )
+                == sparse_target
+            )
