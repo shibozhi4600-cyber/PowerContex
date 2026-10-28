@@ -51,3 +51,13 @@ jobs:
         run: >-
           competition/.venv/bin/python -m pytest -q -c competition/pytest.ini
           tests/test_csv_rows.py tests/builtin/artifacts/memory/test_http_reranker.py
+          tests/test_source_observations.py tests/test_sources.py
+          tests/builtin/persistence/test_sources.py
+          tests/builtin/runtime/test_processing_source_registry.py tests/e2e/test_csv_row_order.py
+
+      - name: Check changed Python interfaces and regressions
+        run: |
+          files=(src/powercontext/sources/csv_rows.py src/powercontext/sources/observations.py src/powercontext/builtin/artifacts/memory/http_reranker.py tests/test_csv_rows.py tests/test_source_observations.py tests/builtin/artifacts/memory/test_http_reranker.py tests/e2e/test_csv_row_order.py)
+          uv tool run --from ruff==0.15.7 ruff check --no-fix "${files[@]}"
+          uv tool run --from ruff==0.15.7 ruff format --check "${files[@]}"
+          uv tool run --from ty==0.0.56 ty check --python competition/.venv "${files[@]}"

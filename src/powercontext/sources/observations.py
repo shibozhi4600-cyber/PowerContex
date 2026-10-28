@@ -17,10 +17,19 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import rfc8785
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from powercontext.errors import (
     InvalidSourceDefinitionError,
@@ -30,6 +39,7 @@ from powercontext.errors import (
 from powercontext.limits import MAX_SOURCE_TYPE_LENGTH
 from powercontext.sources.definitions import SourceDefinition, SourceDefinitionRegistry
 from powercontext.sources.models import Source, SourceMaterialization, SourceProjectionKey
+from powercontext.sources.projections import TEXT_EVIDENCE_PROJECTION_KEY
 
 _JSON_VALUE = TypeAdapter(JsonValue)
 
@@ -119,6 +129,37 @@ class SourceProjectionValue(BaseModel):
 
     key: SourceProjectionKey
     value: JsonValue
+
+    @field_validator("value")
+    @classmethod
+    def restore_csv_column_order(cls, value: JsonValue, info: ValidationInfo) -> JsonValue:
+        if (
+            info.data.get("key") != TEXT_EVIDENCE_PROJECTION_KEY
+            or not isinstance(value, dict)
+            or value.get("source_type") != "csv-row"
+        ):
+            return value
+        metadata = value.get("metadata")
+        if not isinstance(metadata, dict):
+            return value
+        columns, row = metadata.get("columns"), metadata.get("row")
+        if (
+            not isinstance(columns, list)
+            or not columns
+            or any(not isinstance(column, str) or not column.strip() for column in columns)
+            or not isinstance(row, dict)
+        ):
+            return value
+        column_names = cast(list[str], columns)
+        if (
+            len(set(column_names)) != len(column_names)
+            or set(column_names) != row.keys()
+            or any(not isinstance(item, str) for item in row.values())
+        ):
+            return value
+        # Canonical storage sorts object keys; the explicit column array retains
+        # the CSV presentation order without changing any canonical evidence.
+        return value | {"metadata": metadata | {"row": {column: row[column] for column in column_names}}}
 
 
 class SourceObservation(Source):

@@ -15,10 +15,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import urllib.request
 
 import pytest
-from pydantic import ValidationError
+import rfc8785
+from pydantic import JsonValue, ValidationError
 from referencing.exceptions import Unresolvable
 
 from powercontext.builtin.runtime.relational import _json_schema_validator
@@ -30,6 +32,8 @@ from powercontext.sources import (
     SourceDefinitionManifest,
     SourceDefinitionRegistry,
     SourceObservation,
+    SourceProjectionKey,
+    SourceProjectionValue,
     TextEvidence,
     manifest_for_definition,
     project_source_for_transport,
@@ -109,3 +113,77 @@ def test_remote_schema_references_are_rejected_without_network_access(monkeypatc
             fingerprint=f"sha256:{'0' * 64}",
             source_schema={"$dynamicRef": "https://example.invalid/schema"},
         )
+
+
+def _csv_projection() -> dict[str, JsonValue]:
+    return {
+        "source_type": "csv-row",
+        "source_id": "csv:table:001",
+        "content": '{"z":"末尾","id":"001","a":""}',
+        "metadata": {
+            "document_id": "table",
+            "primary_key": "id",
+            "primary_key_value": "001",
+            "columns": ["z", "id", "a"],
+            "row": {"a": "", "id": "001", "z": "末尾"},
+        },
+    }
+
+
+def test_csv_projection_restores_declared_order_without_changing_canonical_value() -> None:
+    value = _csv_projection()
+    encoded = rfc8785.dumps(value)
+    projection = SourceProjectionValue(key=TEXT_EVIDENCE_PROJECTION_KEY, value=value)
+
+    projected = projection.value
+    assert isinstance(projected, dict)
+    projected_metadata = projected["metadata"]
+    assert isinstance(projected_metadata, dict)
+    projected_row = projected_metadata["row"]
+    assert isinstance(projected_row, dict)
+    assert list(projected_row) == ["z", "id", "a"]
+    original_metadata = value["metadata"]
+    assert isinstance(original_metadata, dict)
+    original_row = original_metadata["row"]
+    assert isinstance(original_row, dict)
+    assert list(original_row) == ["a", "id", "z"]
+    assert rfc8785.dumps(projection.value) == encoded
+
+
+@pytest.mark.parametrize(
+    ("name", "version", "source_type"),
+    [
+        (TEXT_EVIDENCE_PROJECTION_KEY.name, "1", "content"),
+        (TEXT_EVIDENCE_PROJECTION_KEY.name, "2", "csv-row"),
+        ("custom.table-evidence", "1", "csv-row"),
+    ],
+)
+def test_other_projection_types_and_versions_retain_their_original_order(name, version, source_type) -> None:
+    value = _csv_projection() | {"source_type": source_type}
+    encoded = json.dumps(value, ensure_ascii=False)
+    projection = SourceProjectionValue(key=SourceProjectionKey(name=name, version=version), value=value)
+    assert json.dumps(projection.value, ensure_ascii=False) == encoded
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        [],
+        {},
+        {"columns": "z,id,a", "row": {"a": "", "id": "001", "z": "末尾"}},
+        {"columns": ["z", "id", "a"], "row": None},
+        {"columns": ["z", "id", "a"], "row": ["末尾", "001", ""]},
+        {"columns": ["z", "id", "a"], "row": {"a": "", "id": "001"}},
+        {"columns": ["z", "id", "a"], "row": {"a": "", "extra": "", "id": "001", "z": "末尾"}},
+        {"columns": ["z", "id", "z"], "row": {"id": "001", "z": "末尾"}},
+        {"columns": ["z", 1, "a"], "row": {"a": "", "id": "001", "z": "末尾"}},
+        {"columns": ["z", "id", " "], "row": {" ": "", "id": "001", "z": "末尾"}},
+        {"columns": ["z", "id", "a"], "row": {"a": None, "id": "001", "z": "末尾"}},
+    ],
+)
+def test_malformed_csv_projection_metadata_is_not_reinterpreted(metadata) -> None:
+    value = _csv_projection() | {"metadata": metadata}
+    encoded = json.dumps(value, ensure_ascii=False)
+    projection = SourceProjectionValue(key=TEXT_EVIDENCE_PROJECTION_KEY, value=value)
+    assert json.dumps(projection.value, ensure_ascii=False) == encoded

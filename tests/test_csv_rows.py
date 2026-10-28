@@ -73,7 +73,9 @@ def test_values_and_distinct_space_keys_survive_transport_roundtrip() -> None:
             original = dict(zip(row.columns, row.values, strict=True))
             assert evidence.source_id == source.name == source.source_id
             assert evidence.content == json.dumps(original, ensure_ascii=False, separators=(",", ":"))
-            assert list(evidence.metadata["row"]) == list(row.columns)
+            captured_row = evidence.metadata["row"]
+            assert isinstance(captured_row, dict)
+            assert list(captured_row) == list(row.columns)
             assert evidence.metadata == {
                 "document_id": row.document_id,
                 "primary_key": row.primary_key,
