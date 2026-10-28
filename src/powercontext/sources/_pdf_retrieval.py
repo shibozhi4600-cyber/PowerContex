@@ -20,8 +20,8 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 
-_PRIORITY = ("balance", "income", "cash", "performance", "segment", "acquisition", "business", "customer")
-_FINANCIAL_KINDS = frozenset({"balance", "income", "cash", "performance", "segment", "acquisition"})
+_PRIORITY = ("balance", "income", "cash", "dividend", "performance", "segment", "acquisition", "business", "customer")
+_FINANCIAL_KINDS = frozenset({"balance", "income", "cash", "dividend", "performance", "segment", "acquisition"})
 _NON_COMPANY_ACRONYMS = frozenset({
     "GAAP",
     "IFRS",
@@ -100,6 +100,34 @@ _INTENT_PATTERNS = (
     ("business", re.compile(r"\bproducts?\b.*\bservices?\b|\bindustry\b|\bgeograph")),
     ("customer", re.compile(r"\bretain|\bretention|card\s*members?|\bcustomers?\b|\bclients?\b")),
 )
+_FORMULA_INTENTS = (
+    (re.compile(r"\bcapital[-\s]+intens(?:ive|ity)\b"), frozenset({"balance", "income", "cash"})),
+    (
+        re.compile(r"\binventor(?:y|ies)\b.*\bturnover\b|\bturnover\b.*\binventor(?:y|ies)\b"),
+        frozenset({"balance", "income"}),
+    ),
+    (
+        re.compile(r"\breturn\s+on\s+(?:assets|equity|(?:invested\s+)?capital)\b|\b(?:roa|roe|roic|roce)\b"),
+        frozenset({"balance", "income"}),
+    ),
+    (re.compile(r"\b(?:assets?|receivables?|payables?)\s+turnover\b"), frozenset({"balance", "income"})),
+    (re.compile(r"\bdebt\s+(?:service\s+)?coverage\b"), frozenset({"balance", "income", "cash"})),
+)
+_STATEMENT_ROWS = {
+    "balance": (
+        r"total\s+assets",
+        r"total\s+liabilities",
+        r"current\s+assets",
+        r"current\s+liabilities",
+        r"(?:share|stock)holders.?\s*equity",
+    ),
+    "income": (
+        r"(?:net\s+sales|(?:total\s+)?revenues?)",
+        r"cost\s+of\s+(?:sales|revenue)",
+        r"(?:operating\s+income|income\s+before|net\s+income|net\s+(?:loss|earnings))",
+    ),
+    "cash": (r"operating\s+activities", r"investing\s+activities", r"financing\s+activities"),
+}
 
 
 def _intents(question: str) -> set[str]:
@@ -109,13 +137,27 @@ def _intents(question: str) -> set[str]:
         r"revenues?|sales|%|percent", normalized
     ):
         result.add("segment")
+    for pattern, kinds in _FORMULA_INTENTS:
+        if pattern.search(normalized):
+            result.update(kinds)
+    if re.search(r"\b(?:statements?\s+of\s+(?:income|operations|earnings)|net\s+income)\b", normalized):
+        result.add("income")
+    if re.search(r"\b(?:statements?\s+of\s+financial\s+position|assets?|liabilities)\b", normalized) and re.search(
+        r"\b(?:ratio|return|statements?)\b", normalized
+    ):
+        result.add("balance")
+    if re.search(r"\bdividends?\b|\bdividend\s+distribution\b", normalized):
+        result.add("dividend")
+    if re.search(r"(?<!\w)m\s*&\s*a(?!\w)|\borganic\b|\bunderlying\b|local[-\s]+currency", normalized):
+        result.add("acquisition")
     return result
 
 
 def _statement_features(text: str) -> dict[str, int]:
-    lines = [" ".join(line.split()).casefold().strip(" .:") for line in text.partition("\n")[2][:2000].splitlines()]
+    body = text.partition("\n")[2]
+    lines = [" ".join(line.split()).casefold().strip(" .:") for line in body[:2500].splitlines()]
     lines = [line for line in lines if line]
-    contents = "table of contents" in lines
+    contents = "tableofcontents" in re.sub(r"\s+", "", body[:150].casefold())
     features: dict[str, int] = {}
     for index, original in enumerate(lines):
         title = original.replace("’", "'")  # noqa: RUF001 - Normalize typographic possessives.
@@ -133,16 +175,60 @@ def _statement_features(text: str) -> dict[str, int]:
             if pattern.fullmatch(title):
                 value = 3 if kind == "acquisition" and note else confidence
                 features[kind] = max(features.get(kind, 0), value)
+    _primary_statement_features(body, lines, features)
+    normalized = " ".join(body.casefold().split())
+    if re.search(r"\bdividends?\b", normalized):
+        if re.search(r"\bconsecutive\s+years?\b|\byears?\s+of\s+(?:dividend\s+)?increases\b", normalized):
+            features["dividend"] = 6
+        elif re.search(r"\bdividends?\s+per\s+(?:common\s+)?share\b|\bdeclared\b.*\bdividends?\b", normalized):
+            features["dividend"] = 3
+        elif any(
+            re.fullmatch(r"(?:cash\s+)?dividends?(?:\s+(?:and\s+)?(?:share|stock)\s+repurchases)?", line)
+            for line in lines
+        ):
+            features["dividend"] = 4
     return features
+
+
+def _primary_statement_features(body: str, lines: list[str], features: dict[str, int]) -> None:
+    normalized = " ".join(body.casefold().split())
+    for index, original in enumerate(lines):
+        # Primary statements start with short headers and tabular rows. A title
+        # appearing after narrative prose is often a column caption or reference.
+        if index > 10 or len(original) > 130 or len(original.split()) > 20:
+            break
+        title = original.replace("’", "'")  # noqa: RUF001 - Normalize typographic possessives.
+        if "...." in title:
+            continue
+        if index + 1 < len(lines) and _PAGE_REFERENCE.fullmatch(lines[index + 1]):
+            continue
+        title = re.sub(r"\s*\((?:unaudited|audited|continued)\)\s*$", "", title)
+        for kind, pattern, _ in _TITLE_PATTERNS:
+            if kind not in _STATEMENT_ROWS or not pattern.fullmatch(title):
+                continue
+            structure = sum(bool(re.search(row, normalized)) for row in _STATEMENT_ROWS[kind])
+            full = title.startswith(("consolidated ", "combined ", "condensed ", "audited ", "unaudited "))
+            confidence = 6 if full and structure >= 2 else 5 if structure >= 2 else 4 if full else 3
+            header = " ".join(lines[:index])
+            if re.search(
+                r"schedule\s+i\b|financial\s+information\s+of\s+parent|parent[-\s]+company|"
+                r"notes?\s+to\s+(?:the\s+)?consolidated\s+financial\s+statements",
+                header,
+            ):
+                confidence -= 2
+            features[kind] = max(features.get(kind, 0), confidence)
 
 
 def _route_acronym(order: list[int], texts: Sequence[str], question: str) -> list[int]:
     labels = {texts[index].partition("\n")[0] for index in order}
     if len(labels) < 2:
         return order
+    # A component of SG&A, PP&E or another ampersand compound is not an
+    # independent company alias. Standalone unknown acronyms remain eligible.
+    alias_query = re.sub(r"(?<!\w)[A-Z][A-Z0-9]{0,7}(?:\s*&\s*[A-Z][A-Z0-9]{0,7})+(?!\w)", " ", question)
     acronyms = {
         term
-        for term in re.findall(r"(?<!\w)[A-Z][A-Z0-9]{1,7}(?!\w)", question)
+        for term in re.findall(r"(?<!\w)[A-Z][A-Z0-9]{1,7}(?!\w)", alias_query)
         if term not in _NON_COMPANY_ACRONYMS and not re.fullmatch(r"FY\d+|\d+[KQF]", term)
     }
     # Ambiguous or multi-entity questions retain their complete candidate pool.
@@ -173,10 +259,11 @@ def rank_pdf_candidates(
     *,
     allow_acronym_routing: bool = False,
 ) -> tuple[int, ...]:
-    """Reserve at most two slots for independently named financial evidence.
+    """Reserve bounded slots for independently named financial evidence.
 
     Positions identify the caller's original records; this function never
     creates text or citations. Explicit document matching remains authoritative.
+    Three-statement formulas may reserve three slots; other intents reserve two.
     """
 
     order = list(baseline_order)
@@ -187,15 +274,19 @@ def rank_pdf_candidates(
         return tuple(order)
     positions = {index: position for position, index in enumerate(order)}
     features = {index: _statement_features(texts[index]) for index in order}
+    max_slots = 3 if {"balance", "income", "cash"} <= kinds else 2
+    quota = min(max_slots, max(1, limit // 4))
+    prefix = order[: max(0, limit - quota)]
     anchors: list[int] = []
     for kind in _PRIORITY:
         if kind not in kinds:
             continue
         found = [index for index in order if kind in features[index]]
         found.sort(key=lambda index: (-features[index][kind], positions[index]))
-        if found and found[0] not in anchors:
+        # A covered first statement must not hide a useful second statement
+        # of the same kind, such as a different period or a continuation page.
+        found = [index for index in found if index not in prefix and index not in anchors]
+        if found:
             anchors.append(found[0])
-    quota = min(2, max(1, limit // 4))
-    prefix = order[: max(0, limit - quota)]
     promoted = [index for index in anchors if index not in prefix][:quota]
     return tuple(prefix + promoted + [index for index in order[len(prefix) :] if index not in promoted])

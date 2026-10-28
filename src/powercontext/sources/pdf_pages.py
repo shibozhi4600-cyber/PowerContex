@@ -421,6 +421,16 @@ def _query_weights(question: str) -> dict[str, float]:
     if "ebitda" in words:
         for word in ("operating", "income", "depreciation", "amortization"):
             weights.setdefault(_stem(word), 0.6)
+    if re.search(r"(?<!\w)m\s*&\s*a(?!\w)|\borganic\b|\bunderlying\b|local[-\s]+currency", question.casefold()):
+        for word, weight in (
+            ("organic", 0.6),
+            ("underlying", 0.6),
+            ("local", 0.45),
+            ("currency", 0.45),
+            ("acquisitions", 0.4),
+            ("divestitures", 0.4),
+        ):
+            weights.setdefault(_stem(word), weight)
     return weights
 
 
