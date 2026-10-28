@@ -1,4 +1,4 @@
-name: Selected PowerContext contest tasks
+name: PowerContext contest acceptance
 
 on:
   push:
@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  csv-and-http-reranking:
+  all-contest-tasks:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       POWERCONTEXT_CANDIDATE: ${{ github.workspace }}
       POWERCONTEXT_PUBLIC: ${{ github.workspace }}/competition
@@ -44,20 +44,17 @@ jobs:
       - name: Verify frozen baseline ancestry
         run: make -C competition check-baseline
 
-      - name: Run unchanged public acceptance tests
-        run: make -C competition test-csv test-rerank
+      - name: Run all unchanged public acceptance tests in isolated processes
+        run: make -C competition test
 
-      - name: Run additional parser and protocol regressions
-        run: >-
-          competition/.venv/bin/python -m pytest -q -c competition/pytest.ini
-          tests/test_csv_rows.py tests/builtin/artifacts/memory/test_http_reranker.py
-          tests/test_source_observations.py tests/test_sources.py
-          tests/builtin/persistence/test_sources.py
-          tests/builtin/runtime/test_processing_source_registry.py tests/e2e/test_csv_row_order.py
+      - name: Run added regressions and affected source and persistence behavior
+        run: |
+          mapfile -t tests < <(git diff --name-only dab240063bfcfa7917898dc44da4baadb3747bd0 HEAD -- 'tests/*.py' 'tests/**/*.py')
+          competition/.venv/bin/python -m pytest -q -c competition/pytest.ini "${tests[@]}" tests/test_sources.py tests/builtin/persistence/test_sources.py tests/builtin/runtime/test_processing_source_registry.py tests/builtin/persistence/test_topic_memory.py tests/builtin/runtime/test_topic_memory_application.py
 
       - name: Check changed Python interfaces and regressions
         run: |
-          files=(src/powercontext/sources/csv_rows.py src/powercontext/sources/observations.py src/powercontext/builtin/artifacts/memory/http_reranker.py tests/test_csv_rows.py tests/test_source_observations.py tests/builtin/artifacts/memory/test_http_reranker.py tests/e2e/test_csv_row_order.py)
+          mapfile -t files < <(git diff --name-only dab240063bfcfa7917898dc44da4baadb3747bd0 HEAD -- '*.py')
           uv tool run --from ruff==0.15.7 ruff check --no-fix "${files[@]}"
           uv tool run --from ruff==0.15.7 ruff format --check "${files[@]}"
           uv tool run --from ty==0.0.56 ty check --python competition/.venv "${files[@]}"
