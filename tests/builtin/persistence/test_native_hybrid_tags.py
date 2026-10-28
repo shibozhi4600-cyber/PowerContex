@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import platform
@@ -59,8 +60,11 @@ class _UnitEmbedding:
         )
 
 
-@pytest.mark.asyncio
-async def test_tagged_hybrid_filters_current_scope_and_uses_both_native_indexes() -> None:
+def test_tagged_hybrid_filters_current_scope_and_uses_both_native_indexes() -> None:
+    asyncio.run(_exercise_tagged_hybrid())
+
+
+async def _exercise_tagged_hybrid() -> None:
     # Keep the embedded database's Unix socket path short, independently of
     # pytest's per-test directory name and the checkout's absolute path.
     with TemporaryDirectory(prefix="pc-hybrid-tags-", dir=os.environ.get("TMPDIR")) as directory:

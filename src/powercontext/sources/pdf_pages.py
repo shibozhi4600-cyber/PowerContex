@@ -30,7 +30,13 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field, field_validator
 
 from powercontext.builtin.artifacts.memory.models import MemoryCitation
-from powercontext.builtin.runtime.models import MemoryEntriesPage, MemorySearchPage, SearchMemoryRequest
+from powercontext.builtin.runtime.models import (
+    MemoryEntriesPage,
+    MemoryEntryRecord,
+    MemorySearchPage,
+    SearchMemoryRequest,
+)
+from powercontext.sources._pdf_retrieval import rank_pdf_candidates
 from powercontext.sources.definitions import AdapterSourceDefinition, SourceDefinition
 from powercontext.sources.models import Source, SourceMaterialization
 from powercontext.sources.projections import TEXT_EVIDENCE_PROJECTION_KEY, TextEvidence
@@ -347,6 +353,34 @@ def _identity_terms(text: str) -> set[str]:
     }
 
 
+def _identity_phrases(text: str) -> set[str]:
+    """Match a compact label only through complete, consecutive question words."""
+    normalized = re.sub(r"['’]s(?![a-z0-9])", "", text.casefold())  # noqa: RUF001 - Typographic possessives.
+    # Keep every original word between the boundaries. Removing even filing
+    # words here could incorrectly join identities separated by another phrase.
+    words = _IDENTITY_WORDS.findall(normalized)
+    return {
+        "".join(words[start : start + width])
+        for start in range(len(words))
+        for width in range(2, 7)
+        if start + width <= len(words)
+    }
+
+
+def _label_identity(text: str) -> tuple[set[str], str]:
+    terms = _identity_terms(text)
+    if not terms:
+        return terms, ""
+    normalized = re.sub(r"['’]s(?![a-z0-9])", "", text.casefold())  # noqa: RUF001 - Typographic possessives.
+    words = _IDENTITY_WORDS.findall(_FILING_MARKERS.sub(" ", normalized))
+    positions = [index for index, word in enumerate(words) if word in terms]
+    # Keep internal words such as "of" while trimming surrounding filing,
+    # extension and year metadata. The whole compact identity must match.
+    compact = "".join(words[positions[0] : positions[-1] + 1])
+    terms.add(compact)
+    return terms, compact
+
+
 def _query_weights(question: str) -> dict[str, float]:
     words = set(_WORDS.findall(question.lower()))
     weights = dict.fromkeys(_terms(question), 1.0)
@@ -358,6 +392,17 @@ def _query_weights(question: str) -> dict[str, float]:
         for word in ("operating", "income", "depreciation", "amortization"):
             weights.setdefault(_stem(word), 0.6)
     return weights
+
+
+def _distinct_page_order(records: list[MemoryEntryRecord], scored: list[tuple[float, int]]) -> tuple[int, ...]:
+    order: list[int] = []
+    seen: set[str] = set()
+    for _, index in scored:
+        source_id = records[index].entry.sources[0].source_id
+        if source_id not in seen:
+            order.append(index)
+            seen.add(source_id)
+    return tuple(order)
 
 
 async def search_pdf_pages(memory: _ScopedMemory, question: str, limit: int = 10) -> tuple[MemoryCitation, ...]:
@@ -389,9 +434,16 @@ async def search_pdf_pages(memory: _ScopedMemory, question: str, limit: int = 10
     # Restrict only when the question explicitly matches a document label word;
     # a year alone never selects an unrelated company.
     question_terms = set(_terms(question))
-    identity_terms = _identity_terms(question)
-    labels = [_identity_terms(record.entry.text.partition("\n")[0]) for record in records]
-    label_matches = [len(label & identity_terms) for label in labels]
+    identity_terms = _identity_terms(question) | _identity_phrases(question)
+    labels = [_label_identity(record.entry.text.partition("\n")[0]) for record in records]
+    label_matches = [len(label & identity_terms) for label, _ in labels]
+    whole_matches = [bool(compact) and compact in identity_terms for _, compact in labels]
+    require_whole = any(whole_matches)
+    # A longer company's partial words must not outrank an explicitly named
+    # complete company identity. Keep the previous fallback when none match.
+    label_matches = [
+        score if whole or not require_whole else 0 for score, whole in zip(label_matches, whole_matches, strict=True)
+    ]
     best_label = max(label_matches)
     if best_label:
         selected = [record for record, count in zip(records, label_matches, strict=True) if count == best_label]
@@ -431,9 +483,16 @@ async def search_pdf_pages(memory: _ScopedMemory, question: str, limit: int = 10
         score += 0.1 / (60 + coarse_ranks.get(record.entry.entry_version_id, 1000))
         scored.append((score, index))
     scored.sort(key=lambda item: (-item[0], item[1]))
+    ranked = rank_pdf_candidates(
+        tuple(record.entry.text for record in records),
+        _distinct_page_order(records, scored),
+        question,
+        limit,
+        allow_acronym_routing=best_label == 0,
+    )
     citations: list[MemoryCitation] = []
     pages: set[str] = set()
-    for _, index in scored:
+    for index in ranked:
         record = records[index]
         page_id = record.entry.sources[0].source_id
         if page_id not in pages:
