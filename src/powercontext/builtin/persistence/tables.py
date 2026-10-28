@@ -1191,6 +1191,7 @@ SOURCE_LIFECYCLE_TOPICS_TABLE = Table(
     SHARED_METADATA,
     Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
     Column("artifact_id", identity_string(MAX_ARTIFACT_ID_LENGTH), primary_key=True),
+    Column("revision", BigInteger, primary_key=True),
     Column("available", Boolean, nullable=False),
 )
 

@@ -102,11 +102,11 @@ class ScopedSourceLifecycle:
         return _Graph() if payload is None else _Graph.model_validate_json(payload)
 
     async def _save(self, graph: _Graph) -> None:
-        topics: dict[str, bool] = {}
+        topics: dict[tuple[str, int], bool] = {}
         for node in graph.nodes.values():
             if node.artifact is not None:
-                artifact_id = node.artifact.artifact_id
-                topics[artifact_id] = topics.get(artifact_id, False) or node.available
+                identity = (node.artifact.artifact_id, node.artifact.revision)
+                topics[identity] = topics.get(identity, False) or node.available
         await self._store.save(self.scope_id, graph.model_dump_json().encode(), topics)
 
     async def register_source(self, node_id: str, source_ref: SourceRef, *, revision: int) -> None:
@@ -227,10 +227,10 @@ class ScopedSourceLifecycle:
     async def _synchronize(self, graph: _Graph, reason: str) -> None:
         # Aliases of one immutable entry can independently support its whole
         # body. Native eligibility is the union of their available supports.
-        groups: dict[tuple[str, str], list[_Node]] = {}
+        groups: dict[tuple[str, str, str], list[_Node]] = {}
         for node in graph.nodes.values():
             if node.citation is not None:
-                key = (node.citation.memory_ref.artifact_id, node.citation.entry_id)
+                key = (node.citation.memory_ref.artifact_id, node.citation.entry_id, node.citation.entry_version_id)
                 groups.setdefault(key, []).append(node)
         for nodes in groups.values():
             available = any(node.available for node in nodes)
@@ -252,7 +252,9 @@ class ScopedSourceLifecycle:
             entries = await service.entries(memory)
             entry = next((entry for entry in entries if entry.entry_id == citation.entry_id), None)
             if entry is None or entry.entry_version_id != citation.entry_version_id:
-                raise SourceLifecycleError("Bound Memory body changed or disappeared")  # noqa: TRY003
+                # Historical versions retain their exact audit/generation
+                # binding; their eligibility must not alter a different current body.
+                return
             manifest_entry = next(
                 item for item in memory.content.manifest.entries if item.entry_id == citation.entry_id
             )

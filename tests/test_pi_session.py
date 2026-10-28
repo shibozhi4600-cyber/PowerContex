@@ -171,3 +171,45 @@ async def test_partial_failure_replays_safely_and_off_branch_mutation_cannot_adv
     with pytest.raises(ValueError, match="changed or removed"):
         await lifecycle.run(PiSessionConnector(path, "right"), binding)
     assert checkpoints.value == stable and sink.attempts == attempts
+
+
+@pytest.mark.parametrize("separator", [chr(0x85), chr(0x2028), chr(0x2029)])
+async def test_unicode_separators_inside_json_strings_survive_incremental_capture(
+    separator: str, tmp_path: Path
+) -> None:
+    root = _message("root", None, f"before{separator}after")
+    result: dict[str, JsonValue] = {
+        "type": "message",
+        "id": "result",
+        "parentId": "root",
+        "message": {
+            "role": "toolResult",
+            "toolName": "read",
+            "toolCallId": "call",
+            "content": [{"type": "text", "text": f"complete{separator}tool output"}],
+        },
+    }
+    # _archive uses ensure_ascii=False: these are literal UTF-8 characters, not
+    # escaped JSON sequences. Only ASCII LF separates the JSONL records.
+    raw = _archive([root, result])
+    assert len([json.loads(line) for line in raw.decode().split("\n")]) == 3
+    events = parse_pi_session(PiSessionInput(content=raw))
+    assert events[0].content == f"user: before{separator}after"
+    assert events[1].content == f"toolResult: [tool_result read call] complete{separator}tool output"
+    assert events[1].record == result
+
+    path = tmp_path / "unicode-session.jsonl"
+    checkpoints, sink = _Checkpoints(), _Sink()
+    lifecycle = ConnectorLifecycle(sink=sink, checkpoints=checkpoints)
+    binding = ConnectorBinding(
+        scope_id="unicode", binding_id="pi", connector_name="pi-session-history", connector_version="1"
+    )
+    path.write_bytes(b"\xef\xbb\xbf" + _archive([root]).replace(b"\n", b"\r\n"))
+    first = await lifecycle.run(PiSessionConnector(path), binding)
+    assert len(first.items) == 1
+    path.write_bytes(b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n"))
+    second = await lifecycle.run(PiSessionConnector(path), binding)
+    assert second.previous_checkpoint == first.committed_checkpoint and len(second.items) == 1
+    assert tuple(sink.captured.values()) == events
+    replay = await lifecycle.run(PiSessionConnector(path), binding)
+    assert replay.items == () and replay.committed_checkpoint == second.committed_checkpoint

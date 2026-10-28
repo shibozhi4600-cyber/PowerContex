@@ -23,12 +23,12 @@ from powercontext.builtin.persistence.tables import SOURCE_LIFECYCLE_GRAPH_TABLE
 from powercontext.sources import SourceMaterialization, SourceRef
 
 
-async def unavailable_topics(connection: AsyncConnection, scope_id: str) -> tuple[str, ...]:
+async def unavailable_topics(connection: AsyncConnection, scope_id: str) -> tuple[tuple[str, int], ...]:
     return tuple(
-        str(item)
+        (str(item[0]), int(item[1]))
         for item in (
-            await connection.scalars(
-                select(SOURCE_LIFECYCLE_TOPICS_TABLE.c.artifact_id).where(
+            await connection.execute(
+                select(SOURCE_LIFECYCLE_TOPICS_TABLE.c.artifact_id, SOURCE_LIFECYCLE_TOPICS_TABLE.c.revision).where(
                     SOURCE_LIFECYCLE_TOPICS_TABLE.c.scope_id == scope_id,
                     SOURCE_LIFECYCLE_TOPICS_TABLE.c.available.is_(False),
                 )
@@ -53,7 +53,7 @@ class SourceLifecycleStore:
             )
             return None if value is None else bytes(value)
 
-    async def save(self, scope_id: str, payload: bytes, topics: dict[str, bool]) -> None:
+    async def save(self, scope_id: str, payload: bytes, topics: dict[tuple[str, int], bool]) -> None:
         async with self.database.transaction() as connection:
             exists = await connection.scalar(
                 select(SOURCE_LIFECYCLE_GRAPH_TABLE.c.scope_id).where(
@@ -79,8 +79,8 @@ class SourceLifecycleStore:
                 await connection.execute(
                     insert(SOURCE_LIFECYCLE_TOPICS_TABLE),
                     [
-                        {"scope_id": scope_id, "artifact_id": artifact_id, "available": available}
-                        for artifact_id, available in topics.items()
+                        {"scope_id": scope_id, "artifact_id": artifact_id, "revision": revision, "available": available}
+                        for (artifact_id, revision), available in topics.items()
                     ],
                 )
 

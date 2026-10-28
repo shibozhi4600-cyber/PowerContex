@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, tuple_, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -381,7 +381,9 @@ class TopicMemoryRepository:
             .where(
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.family == TopicMemory.family,
-                TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.artifact_id.not_in(excluded),
+                tuple_(
+                    TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.artifact_id, TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.revision
+                ).not_in(excluded),
             )
         )
         if tag_filter is not None:
@@ -494,7 +496,11 @@ class TopicMemoryRepository:
         if excluded:
             channels = channels.model_copy(
                 update={
-                    name: tuple(hit for hit in getattr(channels, name) if hit.artifact_ref.artifact_id not in excluded)
+                    name: tuple(
+                        hit
+                        for hit in getattr(channels, name)
+                        if (hit.artifact_ref.artifact_id, hit.artifact_ref.revision) not in excluded
+                    )
                     for name in ("topic_fts", "topic_vector", "detail_fts", "detail_vector")
                 }
             )

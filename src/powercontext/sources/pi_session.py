@@ -188,7 +188,8 @@ def _parse_archive(value: PiSessionInput) -> _Archive:
     decoded = value.content.decode("utf-8-sig")
     entries = [
         json.loads(line, object_pairs_hook=_json_object, parse_constant=_invalid_constant, parse_float=_finite_float)
-        for line in decoded.splitlines()
+        # JSONL uses ASCII LF; Unicode separators can be literal string content.
+        for line in decoded.split("\n")
         if line.strip()
     ]
     session_id = _session_id(entries[0] if entries else None)
